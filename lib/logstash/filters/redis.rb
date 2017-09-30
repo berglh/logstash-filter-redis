@@ -46,7 +46,8 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
   # automatically expire.
   config :ttl, :validate => :number
 
-  # Specify the field in the event that contains value of the KEY in SET operations.
+  # The value to set in the redis key. Value is a string. `%{fieldname}` substitutions are
+  # allowed in the values.
   config :value, :validate => :string
 
   # If the destination (or target) field already exists, this configuration item specifies
@@ -103,7 +104,7 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
     elsif @action == "SET"
       return unless @value
       target = event.get(@field).is_a?(Array) ? event.get(@field).first.to_s : event.get(@field).to_s
-      val = event.get(@value).is_a?(Array) ? event.get(@value).first.to_s : event.get(@value).to_s
+      val = event.sprintf(@value)
       @redis ||= connect
       if val
         begin
