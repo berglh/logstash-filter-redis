@@ -1,3 +1,14 @@
+
+# 0.4.1
+  - Add support for substituting field values using sprintf
+  - Fix gemspec dependencies for logstash 6.3.0
+
+# 0.4.0
+  - Added the SET feature to write values to redis
+  - Added "action" parameter to specify SET or GET 
+  - Added "ttl" parameter for setting expire attributes on SET action
+  - Added "value" field to be used as value for SET action thats supports %{field} substitution
+
 # 0.3.0
   - Added support for logstash 5.0.0
 
