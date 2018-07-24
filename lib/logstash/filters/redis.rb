@@ -9,7 +9,7 @@ require "logstash/namespace"
 # Operationally, if the event field specified in the "field" configuration
 # matches the EXACT contents of a redis key, the field's value will be substituted
 # with the matched key's value from the redis GET <key> command.
-#
+# 
 # By default, the redis filter will replace the contents of the 
 # matching event field (in-place). However, by using the "destination"
 # configuration item, you may also specify a target event field to
@@ -33,21 +33,21 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
   # The redis database number.
   config :db, :validate => :number, :default => 0
   
-  # The name of the logstash event field containing the value to be used as the KEY in
-  # either GET or SET operations. The field value must match exactly the KEY name for GET.
+  # The name of the event field containing the value to be used as the KEY in
+  # either GET or SET operations.
   # 
   # If this field is an array, only the first value will be used.
-  config :field, :validate => :string, :required => true
+  config :key, :validate => :string, :required => true
 
   # The redis action to perform.
   config :action, :validate => [ "GET", "SET" ], :required => true
 
   # Set an optional TTL in seconds for the SET action to have values written to redis
   # automatically expire.
-  config :ttl, :validate => :number
+  config :ttl, :validate => :number, :required => false
 
   # The value to set in the redis key. Value is a string. `%{fieldname}` substitutions are
-  # allowed in the values.
+  # allowed in the values. Only used for "SET".
   config :value, :validate => :string
 
   # If the destination (or target) field already exists, this configuration item specifies
@@ -73,64 +73,149 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
   # then the destination field would still be populated, but with the value of "no match".
   config :fallback, :validate => :string
 
-  # Connection timeout
-  config :timeout, :validate => :number, :required => false, :default => 5
+  # Connection timeout in seconds to Redis server
+  config :timeout, :validate => :number, :default => 1
+
+  # Number of times to retry a failed connection to Redis server
+  config :retries, :validate => :number, :default => 3
+
+  # Number of events to let pass before attempting a reconnect
+  # This will silently fail and pass through this number of events before trying to reconnect
+  # Being kinder on agressive reconnects every event sounds like a good idea
+  config :events_before_retry, :validate => :number, :default => 10000
 
   public
   def register
     require 'redis'
     require 'json'
     @redis = nil
+    @reconnect_timer = 0
+    @connected = false
+    connect
   end # def register
-
-  public
-  def filter(event)
-    return unless event.include?(@field)
-
-    if @action == "GET"
-      return if event.include?(@destination) and not @override
-      source = event.get(@field).is_a?(Array) ? event.get(@field).first.to_s : event.get(@field).to_s
-      @redis ||= connect
-      val = @redis.get(source)
-      if val
-        begin
-          event.set(@destination, JSON.parse(val))
-        rescue JSON::ParserError => e
-          event.set(@destination, val)
-        end
-      elsif @fallback
-        event.set(@destination, @fallback)
-      end
-    elsif @action == "SET"
-      return unless @value
-      target = event.get(@field).is_a?(Array) ? event.get(@field).first.to_s : event.get(@field).to_s
-      val = event.sprintf(@value)
-      @redis ||= connect
-      if val
-        begin
-          @redis.set(target, val)
-          if @ttl
-            begin
-              @redis.expire(target, @ttl)
-            end
-          end
-        end
-      end
-    end
-
-    # filter_matched should go in the last line of our successful code
-    filter_matched(event)
-
-  end # def filter
 
   private
   def connect
-     Redis.new(
-       :host => @host,
-       :port => @port, 
-       :timeout => @timeout,
-       :db => @db,
-       :password => @password.nil? ? nil : @password.value
-     )
+    @connected = false
+    @retries.times do
+      @logger.debug("filter-redis: connecting to redis server")
+      @redis ||= Redis.new(
+        :host => @host,
+        :port => @port,
+        :timeout => @timeout,
+        :db => @db,
+        :password => @password.nil? ? nil : @password.value
+      )
+      begin
+        result = @redis.ping
+        if @redis.connected? && result == "PONG"
+          @connected = true
+          break
+        else
+          @logger.debug("filter-redis: connection failed, retrying")
+        end
+      rescue ::Redis::BaseError => e
+        @logger.warn("filter-redis: redis connection problem", :exception => e)
+      end
+    end
+    return
   end #def connect
+
+  private
+  def get_value(key)
+    success = false
+    value = ''
+    begin
+      value = @redis.get(key)
+      if value != nil
+        success = true
+        return success, value
+      else
+        @logger.debug("filter-redis: unable to find key in redis", :key => ekey)
+      end
+    rescue ::Redis::BaseError => e
+      @logger.debug("filter-redis: redis connection problem", :exception => e)
+    end
+  end #def get_value
+
+  private
+  def set_value(key, value)
+    success = false
+    begin
+      @redis.set(key, value)
+      if @ttl != 0
+        begin
+          @redis.expire(key, @ttl)
+        end
+      end
+      if value
+        success = true
+        return success
+      end
+    rescue ::Redis::BaseError => e
+      @logger.warn("filter-redis: redis connection problem", :exception => e)
+      return success
+    end
+    @logger.warn("filter-redis: redis connection problem", :exception => e)
+    return success
+  end #def set_value
+
+
+  public
+  def filter(event)
+    return unless event.include?(@key)
+
+    # loop to prevent agressive reconnecting
+    if @reconnect_timer == 0 && @redis.connected? == false
+      @logger.debug("filter-redis: reconnect_timer", :reconnect_timer => reconnect_timer)
+      connect
+    else
+      @logger.warn("filter-redis: events_before_retry:", :events_before_retry => events_before_retry)
+      if @reconnect_timer != 0 && @reconnect_timer < @events_before_retry
+        @reconnect_timer += 1
+        return
+      elsif @reconnect_timer != 0 && @reconnect_timer = @events_before_retry
+        # try to connect again after events_before_retry
+        @reconnect_timer = 0
+        return
+      end
+    end
+
+    if @connected
+      # GET
+      if @action == "GET"
+        return if event.include?(@destination) and not @override
+
+        success = nil
+        key = event.get(@key).is_a?(Array) ? event.get(@key).first.to_s : event.get(@key).to_s
+        success, value = get_value(key)
+        if success && value != ''
+          begin
+            event.set(@destination, JSON.parse(value))
+            filter_matched(event)
+          rescue JSON::ParserError => e
+            event.set(@destination, val)
+          end
+        elsif @fallback
+          event.set(@destination, @fallback)
+          filter_matched(event)
+        else
+          @logger.debug("filter-redis: redis didn't find a match for GET", :key => key)
+        end
+      # SET
+      elsif @action == "SET"
+        return unless @value
+      
+        success = nil
+        key = event.get(@key).is_a?(Array) ? event.get(@key).first.to_s : event.get(@key).to_s
+        value = event.sprintf(@value)
+        success = set_value(key, value)
+        if !success
+          @logger.debug("filter-redis: redis wasn't able to SET key value pair", :key => key, :value => value)
+        end
+      end # end SET & GET actions
+    end # if @ connected?
+
+  end # def filter
+
 end # class LogStash::Filters::Redis
