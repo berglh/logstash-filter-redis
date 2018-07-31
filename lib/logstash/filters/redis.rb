@@ -92,7 +92,7 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
     @reconnect_timer = 0
     @connected = false
     connect
-    @logger.warn("filter-redis: variables", :events_before_retry => events_before_retry)
+    @logger.warn("filter-redis: config", :config => @config, :redis => @redis.config, :connected => @connected, :reconnect_timer => @reconnect_timer)
   end # def register
 
   private
@@ -116,7 +116,7 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
           @logger.debug("filter-redis: connection failed, retrying")
         end
       rescue ::Redis::BaseError => e
-        @logger.warn("filter-redis: redis connection problem", :exception => e)
+        @logger.warn("filter-redis: problem establishing redis connection", :exception => e)
       end
     end
     return
@@ -132,10 +132,10 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
         success = true
         return success, value
       else
-        @logger.debug("filter-redis: unable to find key in redis", :key => key)
+        @logger.warn("filter-redis: unable to find key in redis", :key => key)
       end
     rescue ::Redis::BaseError => e
-      @logger.debug("filter-redis: redis connection problem", :exception => e)
+      @logger.warn("filter-redis: problem getting redis key, connection problem", :key => key, :exception => e)
     end
   end #def get_value
 
@@ -154,10 +154,10 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
         return success
       end
     rescue ::Redis::BaseError => e
-      @logger.warn("filter-redis: redis exception - connection problem", :exception => e)
+      @logger.warn("filter-redis: problem setting redis key, connection problem?", :key => key, :value => value, :exception => e)
       return success
     end
-    @logger.warn("filter-redis: redis problem setting key", :key => key, :value => value)
+    @logger.warn("filter-redis: redis problem setting key, connection problem?", :key => key, :value => value)
     return success
   end #def set_value
 
@@ -166,22 +166,19 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
   def filter(event)
     return unless event.include?(@key)
 
-    # loop to prevent agressive reconnecting
-    if @reconnect_timer == 0 && @redis.connected? == false
-      @logger.debug("filter-redis: reconnect_timer", :reconnect_timer => @reconnect_timer)
-      connect
-    else
-      if @reconnect_timer != 0 && @reconnect_timer < @events_before_retry
-        @reconnect_timer += 1
-        return
-      elsif @reconnect_timer != 0 && @reconnect_timer = @events_before_retry
-        # try to connect again after events_before_retry
+    if @reconnect_timer != 0
+      if @reconnect_timer = @events_before_retry
+        @logger.warn("filter-redis: timer threshold hit, time to reconnect", :reconnect_timer => @reconnect_timer)
         @reconnect_timer = 0
-        return
+        connect
       end
+    elsif @reconnect_timer == 0 && !@redis.connected?
+      # connect
+      @logger.warn("filter-redis: reconnect_timer", :reconnect_timer => @reconnect_timer)
+      connect
     end
 
-    if @connected
+    if @redis.connected?
       # GET
       if @action == "GET"
         return if event.include?(@destination) and not @override
@@ -214,8 +211,10 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
           @logger.debug("filter-redis: redis wasn't able to SET key value pair", :key => key, :value => value)
         end
       end # end SET & GET actions
+    else
+      @logger.warn("filter-redis: redis connection offline, incrementing timer", :reconnect_timer => @reconnect_timer)
+      @reconnect_timer += 1
     end # if @ connected?
-
   end # def filter
 
 end # class LogStash::Filters::Redis
