@@ -92,7 +92,7 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
     @reconnect_timer = 0
     @connected = false
     connect
-    @logger.warn("filter-redis: config", :config => @config, :redis => @redis.config, :connected => @connected, :reconnect_timer => @reconnect_timer)
+    @logger.warn("filter-redis: config", :config => @redis.connection, :connected => @connected, :reconnect_timer => @reconnect_timer)
   end # def register
 
   private
