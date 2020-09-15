@@ -42,9 +42,12 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
   # The redis action to perform.
   config :action, :validate => [ "GET", "SET" ], :required => true
 
+  # The format of the value returned by the GET method. JSON will try to decode JSON.
+  config :format, :validate => [ "string", "json" ], :required => false, :default => "string"
+
   # Set an optional TTL in seconds for the SET action to have values written to redis
   # automatically expire.
-  config :ttl, :validate => :number, :required => false
+  config :ttl, :validate => :number, :required => false, :default => 0
 
   # The value to set in the redis key. Value is a string. `%{fieldname}` substitutions are
   # allowed in the values. Only used for "SET".
@@ -128,14 +131,16 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
     value = ''
     begin
       value = @redis.get(key)
-      if value != nil
+      if !value.nil?
         success = true
         return success, value
       else
         @logger.warn("filter-redis: unable to find key in redis", :key => key)
+        return success, nil
       end
     rescue ::Redis::BaseError => e
       @logger.warn("filter-redis: problem getting redis key, connection problem", :key => key, :exception => e)
+      return success, nil
     end
   end #def get_value
 
@@ -186,12 +191,17 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
         success = nil
         key = event.get(@key).is_a?(Array) ? event.get(@key).first.to_s : event.get(@key).to_s
         success, value = get_value(key)
-        if success && value != ''
+        if success && value != '' && !value.nil?          
           begin
-            event.set(@destination, JSON.parse(value))
+            if @format == "string"
+              event.set(@destination, value)
+            elsif @format == "json"
+              event.set(@destination, JSON.parse(value))
+            end
             filter_matched(event)
           rescue JSON::ParserError => e
             event.set(@destination, value)
+            filter_matched(event)
           end
         elsif @fallback
           event.set(@destination, @fallback)
