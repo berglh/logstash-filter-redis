@@ -191,7 +191,7 @@ class LogStash::Filters::Redis < LogStash::Filters::Base
             event.set(@destination, JSON.parse(value))
             filter_matched(event)
           rescue JSON::ParserError => e
-            event.set(@destination, val)
+            event.set(@destination, value)
           end
         elsif @fallback
           event.set(@destination, @fallback)
